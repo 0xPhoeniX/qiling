@@ -1,36 +1,32 @@
 #!/usr/bin/env python3
 # 
 # Cross Platform and Multi Architecture Advanced Binary Emulation Framework
-# Built on top of Unicorn emulator (www.unicorn-engine.org) 
 
-STDCALL = 1
-CDECL = 2
+# global primitive types used in fcalls and api hooks.
+#
+# operating systems may map their own types to these, or create additional ones
+# with custom resolvers (see: QlOs)
+PARAM_INT8  = 1
+PARAM_INT16 = 2
+PARAM_INT32 = 3
+PARAM_INT64 = 4
+PARAM_INTN  = 5
 
-DWORD = 1
-UINT = 1
-INT = 1
-BOOL = 1
-SIZE_T = 1
-BYTE = 1
-ULONGLONG = 2
-HANDLE = 3
-POINTER = 3
-STRING = 4
-WSTRING = 5
-STRING_ADDR = 6
-WSTRING_ADDR = 7
-GUID = 8
+# a generic pointer type that may be used to index pointed types
+PARAM_PTRX  = 128
 
-#OS Threading Constants
-THREAD_EVENT_INIT_VAL = 0
-THREAD_EVENT_EXIT_EVENT = 1
-THREAD_EVENT_UNEXECPT_EVENT = 2
-THREAD_EVENT_EXECVE_EVENT = 3
-THREAD_EVENT_CREATE_THREAD = 4
-THREAD_EVENT_BLOCKING_EVENT = 5
-THREAD_EVENT_EXIT_GROUP_EVENT = 6
-
-THREAD_STATUS_RUNNING = 0
-THREAD_STATUS_BLOCKING = 1
-THREAD_STATUS_TERMINATED = 2
-THREAD_STATUS_TIMEOUT = 3
+# common alises to primitive types.
+# TODO: let each OS define its own aliases and types
+BYTE      = PARAM_INT8
+DWORD     = PARAM_INT32
+INT       = PARAM_INT32
+UINT      = PARAM_INT32
+BOOL      = PARAM_INT32
+LONGLONG  = PARAM_INT64
+ULONGLONG = PARAM_INT64
+SIZE_T    = PARAM_INTN
+POINTER   = PARAM_INTN
+HANDLE    = PARAM_INTN
+STRING    = PARAM_PTRX + 1
+WSTRING   = PARAM_PTRX + 2
+GUID      = PARAM_PTRX + 3

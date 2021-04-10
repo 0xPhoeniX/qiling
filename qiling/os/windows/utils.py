@@ -1,48 +1,38 @@
 #!/usr/bin/env python3
-# 
+#
 # Cross Platform and Multi Architecture Advanced Binary Emulation Framework
-# Built on top of Unicorn emulator (www.unicorn-engine.org) 
+#
 
-import uuid
+import ntpath
 
-from qiling.const import *
-from qiling.os.const import *
+from qiling import Qiling
 
-from .registry import RegistryManager
-from .clipboard import Clipboard
-from .fiber import FiberManager
-from .handle import HandleManager, Handle
-from .thread import QlWindowsThreadManagement, QlWindowsThread
-
-
-def ql_x86_windows_hook_mem_error(ql, access, addr, size, value):
-    ql.dprint(D_INFO, "[+] ERROR: unmapped memory access at 0x%x" % addr)
+def ql_x86_windows_hook_mem_error(ql: Qiling, access, addr: int, size: int, value: int):
+    ql.log.debug(f'ERROR: unmapped memory access at {addr:#x}')
     return False
 
 
-def string_unpack(string):
-    return string.decode().split("\x00")[0]
-
-
-def env_dict_to_array(env_dict):
-    env_list = []
-    for item in env_dict:
-        env_list.append(item + "=" + env_dict[item])
-    return env_list
-
-
-def debug_print_stack(ql, num, message=None):
-    if message:
-        ql.dprint(D_INFO, "========== %s ==========" % message)
-        sp = ql.reg.arch_sp
-        ql.dprint(D_INFO, hex(sp + ql.pointersize * i) + ": " + hex(ql.stack_read(i * ql.pointersize)))
-
-
-def is_file_library(string):
+def is_file_library(string: str) -> bool:
     string = string.lower()
-    extension = string[-4:]
-    return extension in (".dll", ".exe", ".sys", ".drv")
+    extension = string.rpartition('.')[-1]
+    return extension in ("dll", "exe", "sys", "drv")
 
 
-def string_to_hex(string):
-    return ":".join("{:02x}".format(ord(c)) for c in string)
+def path_leaf(path):
+    head, tail = ntpath.split(path)
+    return tail or ntpath.basename(head)
+
+# FIXME: determining a function size by locating 'ret' opcodes in its code is a very unreliable way, to say
+# the least. not only that 'ret' instructions may appear more than once in a single function, they not are
+# necessarily located at the last function basic block: think of a typical nested loop spaghetty.
+#
+# also, there is no telling whether a 0xC3 value found in function code is actually a 'ret' instruction, or
+# just part of a magic value (e.g. "mov eax, 0xffffffc3").
+#
+# finally, if this method happens to find the correct function size, by any chance, that would be a pure luck.
+def find_size_function(ql: Qiling, func_addr: int):
+    # We have to retrieve the return address position
+    code = ql.mem.read(func_addr, 0x100)
+    return_procedures = [b"\xc3", b"\xc2", b"\xcb", b"\xca"]
+    min_index = min([code.index(return_value) for return_value in return_procedures if return_value in code])
+    return min_index

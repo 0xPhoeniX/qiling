@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
 # 
 # Cross Platform and Multi Architecture Advanced Binary Emulation Framework
-# Built on top of Unicorn emulator (www.unicorn-engine.org) 
+#
 
-import struct
+from abc import ABC, abstractmethod
 
-class QlArch:
-    def __init__(self, ql):
+from capstone import Cs
+from keystone import Ks
+
+from . import utils
+from qiling import Qiling
+from qiling.const import QL_ARCH
+
+class QlArch(ABC):
+    def __init__(self, ql: Qiling):
         self.ql = ql
 
     # ql.init_Uc - initialized unicorn engine
@@ -16,79 +23,47 @@ class QlArch:
 
 
     # push value to stack
-    def stack_push(self, value):
+    @abstractmethod
+    def stack_push(self, data: int) -> int:
         pass
 
 
     # pop value to stack
-    def stack_pop(self):
+    @abstractmethod
+    def stack_pop(self) -> int:
         pass
 
 
     # write stack value
-    def stack_write(self, value, data):
+    @abstractmethod
+    def stack_write(self, offset: int, data: int) -> None:
         pass
 
 
     #  read stack value
-    def stack_read(self, value):
+    @abstractmethod
+    def stack_read(self, offset: int) -> int:
         pass
+ 
 
-
-    # set PC
-    def set_pc(self, value):
-        pass
+       # set PC
+    def set_pc(self, address: int):
+        self.ql.reg.arch_pc = address
 
 
     # get PC
-    def get_pc(self):
-        pass
+    def get_pc(self) -> int:
+        return self.ql.reg.arch_pc
 
 
     # set stack pointer
-    def set_sp(self, value):
-        pass
+    def set_sp(self, address: int):
+        self.ql.reg.arch_sp = address
 
 
     # get stack pointer
-    def get_sp(self):
-        pass
-
-
-    # get stack pointer register
-    def get_name_sp(self):
-        pass
-
-
-    # get PC register
-    def get_name_pc(self):
-        pass
-
-
-    # get PC register
-    def get_reg_table(self):
-        pass
-
-
-    # get register name
-    def get_reg_name_str(self):
-        pass
-
-
-    # set register name
-    def set_reg_name_str(self, uc_reg):
-        pass
-   
-   
-    def addr_to_str(self, addr, short=False, endian="big"):
-        if self.ql.archbit == 64 and short == False:
-            addr = (hex(int.from_bytes(struct.pack('<Q', addr), byteorder=endian)))
-            addr = '{:0>16}'.format(addr[2:])
-        elif self.ql.archbit == 32 or short == True:
-            addr = (hex(int.from_bytes(struct.pack('<I', addr), byteorder=endian)))
-            addr = ('{:0>8}'.format(addr[2:]))
-        addr = str(addr)    
-        return addr
+    def get_sp(self) -> int:
+        return self.ql.reg.arch_sp 
 
 
     # Unicorn's CPU state save
@@ -98,4 +73,20 @@ class QlArch:
 
     # Unicorn's CPU state restore method
     def context_restore(self, saved_context):
-        self.ql.uc.context_restore(saved_context)        
+        self.ql.uc.context_restore(saved_context)
+
+
+    def create_disassembler(self) -> Cs:
+        if self.ql.archtype in (QL_ARCH.ARM, QL_ARCH.ARM_THUMB):
+            reg_cpsr = self.ql.reg.cpsr
+        else:
+            reg_cpsr = None
+        return utils.ql_create_disassembler(self.ql.archtype, self.ql.archendian, reg_cpsr)
+
+
+    def create_assembler(self) -> Ks:
+        if self.ql.archtype in (QL_ARCH.ARM, QL_ARCH.ARM_THUMB):
+            reg_cpsr = self.ql.reg.cpsr
+        else:
+            reg_cpsr = None
+        return utils.ql_create_assembler(self.ql.archtype, self.ql.archendian, reg_cpsr)

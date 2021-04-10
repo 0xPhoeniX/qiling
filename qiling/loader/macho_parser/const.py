@@ -2,7 +2,7 @@
 #!/usr/bin/env python3
 # 
 # Cross Platform and Multi Architecture Advanced Binary Emulation Framework
-# Built on top of Unicorn emulator (www.unicorn-engine.org) 
+#
 
 # https://opensource.apple.com/source/cctools/cctools-795/include/mach-o/loader.h
 
@@ -49,6 +49,7 @@ LC_ENCRYPTION_INFO_64   = 0x0000002C
 LC_BUILD_VERSION        = 0x00000032
 LC_DYLD_EXPORTS_TRIE    = 0x80000033
 LC_DYLD_CHAINED_FIXUPS  = 0x80000034
+LC_RPATH                = 0x8000001C
 
 # UNIXTHREAD 
 X86_THREAD_STATE32      = 0x00000001

@@ -1,273 +1,193 @@
 #!/usr/bin/env python3
-# 
+#
 # Cross Platform and Multi Architecture Advanced Binary Emulation Framework
-# Built on top of Unicorn emulator (www.unicorn-engine.org) 
+#
 
-import os, sys
+import sys
+from typing import Any, Optional, Callable, Mapping
 
-from .utils import QLOsUtils
-from .const import *
+from qiling import Qiling
+from qiling.const import QL_OS, QL_INTERCEPT, QL_OS_POSIX
+from qiling.os.const import STRING, WSTRING, GUID
+from qiling.os.fcall import QlFunctionCall
+
 from .filestruct import ql_file
+from .mapper import QlFsMapper
+from .utils import QlOsUtils
+from .path import QlPathManager
 
-from qiling.const import *
+class QlOs:
+    Resolver = Callable[[int], Any]
 
-class QlOs(QLOsUtils):
-    def __init__(self, ql):
-        super(QlOs, self).__init__(ql)
+    def __init__(self, ql: Qiling, resolvers: Mapping[Any, Resolver] = {}):
         self.ql = ql
-        self.ql.uc = self.ql.arch.init_uc
-        self.stdin = ql_file('stdin', sys.stdin.fileno())
-        self.stdout = ql_file('stdout', sys.stdout.fileno())
-        self.stderr = ql_file('stderr', sys.stderr.fileno())
+        self.utils = QlOsUtils(ql)
+        self.fcall: Optional[QlFunctionCall] = None
+        self.fs_mapper = QlFsMapper(ql)
         self.child_processes = False
         self.thread_management = None
-        self.current_path = '/'
         self.profile = self.ql.profile
+        self.path = QlPathManager(ql, self.ql.profile.get("MISC", "current_path"))
         self.exit_code = 0
-        self.pid = self.profile.getint("KERNEL","pid")
+        self.services = {}
+        self.elf_mem_start = 0x0
+
+        self.user_defined_api = {
+            QL_INTERCEPT.CALL : {},
+            QL_INTERCEPT.ENTER: {},
+            QL_INTERCEPT.EXIT : {}
+        }
+
+        # IDAPython has some hack on standard io streams and thus they don't have corresponding fds.
+        try:
+            import ida_idaapi
+        except ImportError:
+            self.stdin  = ql_file('stdin',  sys.stdin.fileno())
+            self.stdout = ql_file('stdout', sys.stdout.fileno())
+            self.stderr = ql_file('stderr', sys.stderr.fileno())
+        else:
+            self.stdin  = sys.stdin.buffer  if hasattr(sys.stdin,  "buffer") else sys.stdin
+            self.stdout = sys.stdout.buffer if hasattr(sys.stdout, "buffer") else sys.stdout
+            self.stderr = sys.stderr.buffer if hasattr(sys.stderr, "buffer") else sys.stderr
 
         if self.ql.stdin != 0:
             self.stdin = self.ql.stdin
-        
+
         if self.ql.stdout != 0:
             self.stdout = self.ql.stdout
-        
+
         if self.ql.stderr != 0:
             self.stderr = self.ql.stderr
 
-        if self.ql.archbit == 32:
-            EMU_END = 0x8fffffff
-        elif self.ql.archbit == 64:
-            EMU_END = 0xffffffffffffffff        
-        
         # defult exit point
-        self.exit_point = EMU_END
+        self.exit_point = {
+            16: 0xfffff,            # 20bit address lane
+            32: 0x8fffffff,
+            64: 0xffffffffffffffff
+        }.get(self.ql.archbit, None)
 
-        if self.ql.shellcoder:
-            self.shellcoder_ram_size = int(self.profile.get("SHELLCODER", "ram_size"), 16)
+        if self.ql.code:
+            self.code_ram_size = int(self.profile.get("CODE", "ram_size"), 16)
             # this shellcode entrypoint does not work for windows
             # windows shellcode entry point will comes from pe loader
-            self.entry_point = int(self.profile.get("SHELLCODER", "entry_point"), 16)
+            self.entry_point = int(self.profile.get("CODE", "entry_point"), 16)
 
-        # We can save every syscall called
-        self.syscalls = {}
-        self.syscalls_counter = 0
-        self.appeared_strings = {}
-        self.setup_output()
+        # default fcall paramters resolving methods
+        self.resolvers = {
+            STRING : lambda ptr: ptr and self.utils.read_cstring(ptr),
+            WSTRING: lambda ptr: ptr and self.utils.read_wstring(ptr),
+            GUID   : lambda ptr: ptr and str(self.utils.read_guid(ptr))
+        }
+
+        # let the user override default resolvers or add custom ones
+        self.resolvers.update(resolvers)
+
+        self.utils.setup_output()
+
+    def save(self):
+        return {}
+
+    def restore(self, saved_state):
+        pass
+
+    def resolve_fcall_params(self, params: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Transform function call raw parameters values into meaningful ones, according to
+        their assigned type.
+
+        Args:
+            params: a mapping of parameter names to their types
+
+        Returns: a mapping of parameter names to their resolved values
+        """
+
+        # TODO: could use func.__annotations__ to resolve parameters and return type.
+        #       that would require redefining all hook functions with python annotations, but
+        #       also simplify hooks code (e.g. no need to do:  x = params["x"] )
+
+        names = params.keys()
+        types = params.values()
+        values = self.fcall.readParams(types)
+        resolved = {}
+
+        for name, typ, val in zip(names, types, values):
+            if typ in self.resolvers:
+                val = self.resolvers[typ](val)
+
+            resolved[name] = val
+
+        return resolved
+
+    def call(self, pc: int, func: Callable, proto: Mapping[str, Any], onenter: Optional[Callable], onexit: Optional[Callable], passthru: bool = False):
+        # resolve arguments values according to their types
+        args = self.resolve_fcall_params(proto)
+
+        # call hooked function
+        args, retval, retaddr = self.fcall.call(func, proto, args, onenter, onexit, passthru)
+
+        # print
+        self.utils.print_function(pc, func.__name__, args, retval, passthru)
+
+        # append syscall to list
+        self.utils._call_api(pc, func.__name__, args, retval, retaddr)
+
+        # TODO: PE_RUN is a Windows and UEFI property; move somewhere else?
+        if hasattr(self, 'PE_RUN') and not self.PE_RUN:
+            return retval
+
+        if not passthru:
+            self.ql.reg.arch_pc = retaddr
+
+        return retval
+
+    # TODO: separate this method into os-specific functionalities, instead of 'if-else'
+    def set_api(self, api_name: str, intercept_function: Callable, intercept: QL_INTERCEPT):
+        if self.ql.ostype == QL_OS.UEFI:
+            api_name = f'hook_{api_name}'
+
+        # BUG: workaround missing arg
+        if intercept is None:
+            intercept = QL_INTERCEPT.CALL
+
+        if (self.ql.ostype in (QL_OS.WINDOWS, QL_OS.UEFI, QL_OS.DOS)) or (self.ql.ostype in (QL_OS_POSIX) and self.ql.loader.is_driver):
+            self.user_defined_api[intercept][api_name] = intercept_function
+        else:
+            self.add_function_hook(api_name, intercept_function, intercept)
+
+    def find_containing_image(self, pc):
+        for image in self.ql.loader.images:
+            if image.base <= pc < image.end:
+                return image
+
+    def stop(self):
+        if self.ql.multithread:
+            self.thread_management.stop() 
+        else:
+            self.ql.emu_stop()
 
     def emu_error(self):
-        self.ql.nprint("[!] Emulation Error")
-        
-        self.ql.nprint("\n")
-        for reg in self.ql.reg.table:
-            REG_NAME = reg
-            REG_VAL = self.ql.reg.read(reg)
-            self.ql.nprint("[-] %s\t:\t 0x%x" % (REG_NAME, REG_VAL))
-        
-        self.ql.nprint("\n")
-        self.ql.nprint("[+] PC = 0x%x" %(self.ql.reg.arch_pc))
+        self.ql.log.error("\n")
+
+        for reg in self.ql.reg.register_mapping:
+            if isinstance(reg, str):
+                REG_NAME = reg
+                REG_VAL = self.ql.reg.read(reg)
+                self.ql.log.error("%s\t:\t 0x%x" % (REG_NAME, REG_VAL))
+
+        self.ql.log.error("\n")
+        self.ql.log.error("PC = 0x%x" % (self.ql.reg.arch_pc))
+        containing_image = self.find_containing_image(self.ql.reg.arch_pc)
+        if containing_image:
+            offset = self.ql.reg.arch_pc - containing_image.base
+            self.ql.log.error(" (%s+0x%x)" % (containing_image.path, offset))
+        else:
+            self.ql.log.info("\n")
         self.ql.mem.show_mapinfo()
-        
-        self.ql.nprint("\n")
-        buf = self.ql.mem.read(self.ql.reg.arch_pc, 8)
-        self.ql.nprint("[+] %r" % ([hex(_) for _ in buf]))
-        
-        self.ql.nprint("\n")
-        self.disassembler(self.ql, self.ql.reg.arch_pc, 64)
 
+        try:
+            buf = self.ql.mem.read(self.ql.reg.arch_pc, 8)
+            self.ql.log.error("%r" % ([hex(_) for _ in buf]))
 
-    def _x86_get_params_by_index(self, index):
-        # index starts from 0
-        # skip ret_addr
-        return self.ql.stack_read((index + 1) * 4)
-
-
-    def _x8664_get_params_by_index(self, index):
-        reg_list = ["rcx", "rdx", "r8", "r9"]
-        if index < 4:
-            return self.ql.reg.read(reg_list[index])
-
-        index -= 4
-        # skip ret_addr
-        return self.ql.stack_read((index + 5) * 8)
-
-
-    def get_param_by_index(self, index):
-        if self.ql.archtype == QL_ARCH.X86:
-            return self._x86_get_params_by_index(index)
-        elif self.ql.archtype == QL_ARCH.X8664:
-            return self._x8664_get_params_by_index(index)
-
-
-    def _x86_get_args(self, number):
-        arg_list = []
-        for i in range(number):
-            # skip ret_addr
-            arg_list.append(self.ql.stack_read((i + 1) * 4))
-        if number == 1:
-            return arg_list[0]
-        else:
-            return arg_list
-
-
-    def _x8664_get_args(self, number):
-        reg_list = ["rcx", "rdx", "r8", "r9"]
-        arg_list = []
-        reg_num = number
-        if reg_num > 4:
-            reg_num = 4
-        number -= reg_num
-        for i in reg_list[:reg_num]:
-            arg_list.append(self.ql.reg.read(i))
-        for i in range(number):
-            # skip ret_addr and 32 byte home space
-            arg_list.append(self.ql.stack_read((i + 5) * 8))
-        if reg_num == 1:
-            return arg_list[0]
-        else:
-            return arg_list
-
-
-    def set_function_params(self, in_params, out_params):
-        index = 0
-        for each in in_params:
-            if in_params[each] == DWORD or in_params[each] == POINTER:
-                out_params[each] = self.get_param_by_index(index)
-            elif in_params[each] == ULONGLONG:
-                if self.ql.archtype == QL_ARCH.X86:
-                    low = self.get_param_by_index(index)
-                    index += 1
-                    high = self.get_param_by_index(index)
-                    out_params[each] = high << 32 + low
-                else:
-                    out_params[each] = self.get_param_by_index(index)
-            elif in_params[each] == STRING or in_params[each] == STRING_ADDR:
-                ptr = self.get_param_by_index(index)
-                if ptr == 0:
-                    out_params[each] = 0
-                else:
-                    content = self.read_cstring(ptr)
-                    if in_params[each] == STRING_ADDR:
-                        out_params[each] = (ptr, content)
-                    else:
-                        out_params[each] = content
-            elif in_params[each] == WSTRING or in_params[each] == WSTRING_ADDR:
-                ptr = self.get_param_by_index(index)
-                if ptr == 0:
-                    out_params[each] = 0
-                else:
-                    content = self.read_wstring(ptr)
-                    if in_params[each] == WSTRING_ADDR:
-                        out_params[each] = (ptr, content)
-                    else:
-                        out_params[each] = content
-            elif in_params[each] == GUID:
-                ptr = self.get_param_by_index(index)
-                if ptr == 0:
-                    out_params[each] = 0
-                else:
-                    out_params[each] = str(self.read_guid(ptr))
-            index += 1
-        return index
-
-
-    def get_function_param(self, number):
-        if self.ql.archtype == QL_ARCH.X86:
-            return self._x86_get_args(number)
-        elif self.ql.archtype == QL_ARCH.X8664:
-            return self._x8664_get_args(number)
-
-
-    def set_return_value(self, ret):
-        if self.ql.archtype == QL_ARCH.X86:
-            self.ql.reg.eax = ret
-        elif self.ql.archtype == QL_ARCH.X8664:
-            self.ql.reg.rax = ret
-
-
-    def get_return_value(self):
-        if self.ql.archtype == QL_ARCH.X86:
-            return self.ql.reg.eax
-        elif self.ql.archtype == QL_ARCH.X8664:
-            return self.ql.reg.rax
-
-    #
-    # stdcall cdecl fastcall cc
-    #
-
-    def __x86_cc(self, param_num, params, func, args, kwargs):
-        # read params
-        if params is not None:
-            param_num = self.set_function_params(params, args[2])
-        # call function
-        result = func(*args, **kwargs)
-
-        # set return value
-        if result is not None:
-            self.set_return_value(result)
-        # print
-        self.print_function(args[1], func.__name__, args[2], result)
-
-        return result, param_num
-
-
-    def _call_api(self, name, params, result, address, return_address):
-        params_with_values = {}
-        if name.startswith("hook_"):
-            name = name.split("hook_", 1)[1]
-            # printfs are shit
-            if params is not None:
-                self.set_function_params(params, params_with_values)
-        self.syscalls.setdefault(name, []).append({
-            "params": params_with_values,
-            "result": result,
-            "address": address,
-            "return_address": return_address,
-            "position": self.syscalls_counter
-        })
-
-        self.ql.os.syscalls_counter += 1
-
-
-    def x86_stdcall(self, param_num, params, func, args, kwargs):
-        # if we check ret_addr before the call, we can't modify the ret_addr from inside the hook
-        result, param_num = self.__x86_cc(param_num, params, func, args, kwargs)
-
-        # get ret addr
-        ret_addr = self.ql.stack_read(0)
-
-        # append syscall to list
-        self._call_api(func.__name__, params, result, self.ql.reg.arch_pc, ret_addr)
-
-        # update stack pointer
-        self.ql.reg.arch_sp = self.ql.reg.arch_sp + ((param_num + 1) * 4)
-
-        if self.PE_RUN:
-            self.ql.reg.arch_pc = ret_addr
-
-        return result
-
-
-    def x86_cdecl(self, param_num, params, func, args, kwargs):
-        result, param_num = self.__x86_cc(param_num, params, func, args, kwargs)
-        old_pc = self.ql.reg.arch_pc
-        # append syscall to list
-        self._call_api(func.__name__, params, result, old_pc, self.ql.stack_read(0))
-
-        if self.PE_RUN:
-            self.ql.reg.arch_pc = self.ql.stack_pop()
-
-        return result
-
-
-    def x8664_fastcall(self, param_num, params, func, args, kwargs):
-        result, param_num = self.__x86_cc(param_num, params, func, args, kwargs)
-
-        old_pc = self.ql.reg.arch_pc
-        # append syscall to list
-        self._call_api(func.__name__, params, result, old_pc, self.ql.stack_read(0))
-
-        if self.PE_RUN:
-           self.ql.reg.arch_pc = self.ql.stack_pop()
-
-        return result
+            self.ql.log.info("\n")
+            self.utils.disassembler(self.ql, self.ql.reg.arch_pc, 64)
+        except:
+            self.ql.log.error("Error: PC(0x%x) Unreachable" % self.ql.reg.arch_pc)

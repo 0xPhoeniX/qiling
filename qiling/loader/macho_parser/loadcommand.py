@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # 
 # Cross Platform and Multi Architecture Advanced Binary Emulation Framework
-# Built on top of Unicorn emulator (www.unicorn-engine.org) 
+#
+
+from struct import unpack
 
 from .const import *
 from .utils import *
-from struct import unpack
 
 # TODO: We need support more LC command to load more kinds of binary
 
@@ -41,6 +42,7 @@ class LoadCommand:
             LC_ENCRYPTION_INFO_64   :   LoadEncryptionInfo64,
             LC_DYLD_EXPORTS_TRIE    :   LoadDyldExportTrie,
             LC_DYLD_CHAINED_FIXUPS  :   LoadDyldChainedFixups,
+            LC_RPATH                :   LoadRPath,
             LC_BUILD_VERSION        :   LoadBuildVersion
         }
 
@@ -511,3 +513,10 @@ class LoadBuildVersion(LoadCommand):
     def get_complete(self):
         pass        
     
+
+class LoadRPath(LoadCommand):
+    def __init__(self, data):
+        super().__init__(data)
+        self.offset = unpack("<L", self.FR.read(4))[0]
+        self.FR.setOffset(self.offset)
+        self.path   = self.FR.readString(4)

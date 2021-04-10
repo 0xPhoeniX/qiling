@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
 # 
 # Cross Platform and Multi Architecture Advanced Binary Emulation Framework
-# Built on top of Unicorn emulator (www.unicorn-engine.org) 
+#
 
-import struct
-from qiling.const import *
+from typing import Any, Mapping
 
-def dxeapi(param_num=None, params=None):
+from qiling import Qiling
+from qiling.const import QL_INTERCEPT
+
+def dxeapi(params: Mapping[str, Any] = {}):
     def decorator(func):
-        def wrapper(*args, **kwargs):
-            ql = args[0]
-            arg = (ql, ql.reg.arch_pc, {})
-            f = func
-            if func.__name__ in ql.loader.user_defined_api:
-                f = ql.loader.user_defined_api[func.__name__]
-            return ql.os.x8664_fastcall(param_num, params, f, arg, kwargs)
+        def wrapper(ql: Qiling):
+            pc = ql.reg.arch_pc
+            fname = func.__name__
+
+            f = ql.os.user_defined_api[QL_INTERCEPT.CALL].get(fname) or func
+            onenter = ql.os.user_defined_api[QL_INTERCEPT.ENTER].get(fname)
+            onexit = ql.os.user_defined_api[QL_INTERCEPT.EXIT].get(fname)
+
+            return ql.os.call(pc, f, params, onenter, onexit)
 
         return wrapper
 
